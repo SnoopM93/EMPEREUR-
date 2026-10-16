@@ -1,27 +1,24 @@
 {
-  "name": "mon-projet-pronostics",
+  "name": "ai-scorecast-bot",
   "version": "1.0.0",
-  "description": "Bot de pronostics sportifs IA et API backend",
+  "description": "Bot de pronostics sportifs avec IA",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "sync": "node sync.js",
     "predict": "node services/PredictionEngine.js",
-    "prisma:generate": "prisma generate",
-    "prisma:push": "prisma db push"
+    "postinstall": "prisma generate"
   },
   "dependencies": {
-    "@prisma/client": "^5.10.0",
+    "@prisma/client": "^5.10.2",
     "axios": "^1.6.7",
-    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
-    "jsonwebtoken": "^9.0.2",
     "node-cron": "^3.0.3",
     "node-telegram-bot-api": "^0.64.0"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "devDependencies": {
+    "prisma": "^5.10.2"
   }
 }
