@@ -14,6 +14,7 @@ model League {
   country    String
   logoUrl    String?
   matches    Match[]
+  teams      Team[]   // <-- Ligne ajoutée pour corriger l'erreur P1012
 }
 
 model Team {
