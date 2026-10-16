@@ -1,4 +1,4 @@
-import { Client, Collection, Events, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes } from 'discord.js';
+import { Telegraf } from 'telegraf';
 import 'dotenv/config';
 import http from 'node:http';
 
@@ -8,7 +8,7 @@ import http from 'node:http';
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot Empereur Predication en ligne');
+  res.end('Bot Telegram Empereur Predication en ligne');
 }).listen(PORT, () => {
   console.log(`Serveur HTTP actif sur le port ${PORT}`);
 });
@@ -17,8 +17,6 @@ http.createServer((req, res) => {
 // 1. CONFIGURATION
 // =====================
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const FOOTBALL_KEY = process.env.FOOTBALL_KEY;
 const ODDS_API_KEY = process.env.ODDS_API;
 
@@ -58,6 +56,26 @@ async function getMatchStats(matchId) {
     return data?.data ?? null;
   } catch {
     return null;
+  }
+}
+
+async function getTeamRecentMatches(teamId, limit = 15) {
+  try {
+    const data = await requestFootball(`/teams/${teamId}/matches?limit=${limit}&status=finished`);
+    return data?.data ?? [];
+  } catch (error) {
+    console.warn('Historique equipe indisponible:', error.message);
+    return [];
+  }
+}
+
+async function getHeadToHead(team1Id, team2Id, limit = 15) {
+  try {
+    const data = await requestFootball(`/head2head?team1=${team1Id}&team2=${team2Id}&limit=${limit}`);
+    return data?.data ?? [];
+  } catch (error) {
+    console.warn('H2H indisponible:', error.message);
+    return [];
   }
 }
 
@@ -121,7 +139,78 @@ async function getMarketOdds(eventId, marketKey) {
 }
 
 // =====================
-// 4. PREDICTION 1X2
+// 4. FORME PONDEREE
+// =====================
+function calculateForm(recentMatches, teamId) {
+  if (!recentMatches || recentMatches.length === 0) {
+    return { score: 50, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0, matches: 0 };
+  }
+
+  let weightedPoints = 0;
+  let totalWeight = 0;
+  let wins = 0, draws = 0, losses = 0;
+  let goalsFor = 0, goalsAgainst = 0;
+
+  recentMatches.forEach((match, index) => {
+    const weight = Math.pow(0.9, index);
+    const isHome = match.home_team_id === teamId;
+    const teamScore = isHome ? match.home_score : match.away_score;
+    const oppScore = isHome ? match.away_score : match.home_score;
+
+    if (teamScore == null || oppScore == null) return;
+
+    goalsFor += teamScore;
+    goalsAgainst += oppScore;
+
+    let points = 0;
+    if (teamScore > oppScore) { points = 3; wins++; }
+    else if (teamScore === oppScore) { points = 1; draws++; }
+    else { losses++; }
+
+    weightedPoints += points * weight;
+    totalWeight += 3 * weight;
+  });
+
+  const score = totalWeight > 0 ? Math.round((weightedPoints / totalWeight) * 100) : 50;
+  return { score, wins, draws, losses, goalsFor, goalsAgainst, matches: recentMatches.length };
+}
+
+// =====================
+// 5. H2H
+// =====================
+function analyzeH2H(matches, team1Id) {
+  if (!matches || matches.length === 0) {
+    return { team1Wins: 0, draws: 0, team2Wins: 0, total: 0, team1Goals: 0, team2Goals: 0, bttsCount: 0, over25Count: 0 };
+  }
+
+  let team1Wins = 0, draws = 0, team2Wins = 0;
+  let team1Goals = 0, team2Goals = 0;
+  let bttsCount = 0;
+  let over25Count = 0;
+
+  matches.forEach(match => {
+    const isTeam1Home = match.home_team_id === team1Id;
+    const score1 = isTeam1Home ? match.home_score : match.away_score;
+    const score2 = isTeam1Home ? match.away_score : match.home_score;
+
+    if (score1 == null || score2 == null) return;
+
+    team1Goals += score1;
+    team2Goals += score2;
+
+    if (score1 > score2) team1Wins++;
+    else if (score1 === score2) draws++;
+    else team2Wins++;
+
+    if (score1 > 0 && score2 > 0) bttsCount++;
+    if (score1 + score2 > 2.5) over25Count++;
+  });
+
+  return { team1Wins, draws, team2Wins, total: matches.length, team1Goals, team2Goals, bttsCount, over25Count };
+}
+
+// =====================
+// 6. PREDICTION 1X2
 // =====================
 async function getPrediction(homeTeamName, awayTeamName) {
   const [homeTeam, awayTeam] = await Promise.all([
@@ -135,27 +224,55 @@ async function getPrediction(homeTeamName, awayTeamName) {
   if (!match) throw new Error('Aucun match a venir trouve entre ces deux equipes.');
 
   const probs = await getMatchProbabilities(match.id);
-  if (!probs) throw new Error("L'API n'a pas retourne de probabilites pour ce match.");
+
+  const [homeMatches, awayMatches, h2hMatches] = await Promise.all([
+    getTeamRecentMatches(homeTeam.id),
+    getTeamRecentMatches(awayTeam.id),
+    getHeadToHead(homeTeam.id, awayTeam.id)
+  ]);
+
+  const homeForm = calculateForm(homeMatches, homeTeam.id);
+  const awayForm = calculateForm(awayMatches, awayTeam.id);
+  const h2h = analyzeH2H(h2hMatches, homeTeam.id);
+
+  let finalHome, finalDraw, finalAway;
+  if (probs) {
+    finalHome = Math.round((probs.home_win ?? 0) * 100);
+    finalDraw = Math.round((probs.draw ?? 0) * 100);
+    finalAway = Math.round((probs.away_win ?? 0) * 100);
+  } else {
+    const homeAdvantage = 10;
+    const pHome = (homeForm.score * 0.40) + ((100 - awayForm.score) * 0.30) + homeAdvantage;
+    const pDraw = 25;
+    const pAway = (awayForm.score * 0.40) + ((100 - homeForm.score) * 0.30);
+    const total = pHome + pDraw + pAway;
+    finalHome = Math.round((pHome / total) * 100);
+    finalDraw = Math.round((pDraw / total) * 100);
+    finalAway = Math.round((pAway / total) * 100);
+  }
 
   return {
     matchId: match.id,
-    homeWinProb: Math.round((probs.home_win ?? 0) * 100),
-    drawProb: Math.round((probs.draw ?? 0) * 100),
-    awayWinProb: Math.round((probs.away_win ?? 0) * 100)
+    homeTeamId: homeTeam.id,
+    awayTeamId: awayTeam.id,
+    homeWinProb: finalHome,
+    drawProb: finalDraw,
+    awayWinProb: finalAway,
+    homeForm,
+    awayForm,
+    h2h
   };
 }
 
 // =====================
-// 5. TOTAL DE BUTS
+// 7. MARCHES SUPPLEMENTAIRES
 // =====================
 async function predictTotalGoals(eventId) {
   const outcomes = await getMarketOdds(eventId, 'totals');
   if (!outcomes) return null;
-
   const over = outcomes.find(o => o.name === 'Over');
   const under = outcomes.find(o => o.name === 'Under');
   if (!over || !under) return null;
-
   return {
     line: over.point ?? 2.5,
     over: over.price,
@@ -165,17 +282,12 @@ async function predictTotalGoals(eventId) {
   };
 }
 
-// =====================
-// 6. BTTS
-// =====================
 async function predictBTTS(eventId) {
   const outcomes = await getMarketOdds(eventId, 'btts');
   if (!outcomes) return null;
-
   const yes = outcomes.find(o => o.name === 'Yes');
   const no = outcomes.find(o => o.name === 'No');
   if (!yes || !no) return null;
-
   return {
     yes: yes.price,
     no: no.price,
@@ -184,80 +296,48 @@ async function predictBTTS(eventId) {
   };
 }
 
-// =====================
-// 7. CORNERS
-// =====================
 async function predictCorners(matchId) {
   const stats = await getMatchStats(matchId);
   if (!stats) return null;
-
   const homeCorners = stats.home?.corners ?? 0;
   const awayCorners = stats.away?.corners ?? 0;
   const total = homeCorners + awayCorners;
-
   if (homeCorners === 0 && awayCorners === 0) return null;
-
   const line = 9.5;
   return {
-    home: homeCorners,
-    away: awayCorners,
-    total,
-    line,
+    home: homeCorners, away: awayCorners, total, line,
     prediction: total > line ? `Plus de ${line}` : `Moins de ${line}`
   };
 }
 
-// =====================
-// 8. TIRS CADRES
-// =====================
 async function predictShotsOnTarget(matchId) {
   const stats = await getMatchStats(matchId);
   if (!stats) return null;
-
   const homeShots = stats.home?.shots_on_target ?? 0;
   const awayShots = stats.away?.shots_on_target ?? 0;
   const total = homeShots + awayShots;
-
   if (homeShots === 0 && awayShots === 0) return null;
-
   const line = 8.5;
   return {
-    home: homeShots,
-    away: awayShots,
-    total,
-    line,
+    home: homeShots, away: awayShots, total, line,
     prediction: total > line ? `Plus de ${line}` : `Moins de ${line}`
   };
 }
 
-// =====================
-// 9. SCORE EXACT
-// =====================
 async function predictExactScore(matchId) {
   try {
     const predictions = await requestFootball(`/matches/${matchId}/predictions`);
     const predData = predictions?.data;
-
     if (!predData?.correct_score) return null;
-
-    const scores = Object.entries(predData.correct_score)
+    return Object.entries(predData.correct_score)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 3)
-      .map(([score, prob]) => ({
-        score,
-        probability: Math.round(prob * 100)
-      }));
-
-    return scores;
-  } catch (error) {
-    console.warn('Score exact indisponible:', error.message);
+      .map(([score, prob]) => ({ score, probability: Math.round(prob * 100) }));
+  } catch {
     return null;
   }
 }
 
-// =====================
-// 10. PREDICTION COMPLETE
-// =====================
 async function getFullPrediction(homeTeamName, awayTeamName) {
   const base = await getPrediction(homeTeamName, awayTeamName);
   const eventId = await findOddsEventId(homeTeamName, awayTeamName);
@@ -275,155 +355,241 @@ async function getFullPrediction(homeTeamName, awayTeamName) {
 }
 
 // =====================
-// 11. COMMANDE SLASH
+// 8. CONSTRUCTION DES MESSAGES (HTML)
 // =====================
-const commandsData = [
-  new SlashCommandBuilder()
-    .setName('predire')
-    .setDescription("Predit tous les marches d'un match.")
-    .addStringOption(opt =>
-      opt.setName('equipe_domicile').setDescription("L'equipe qui recoit.").setRequired(true))
-    .addStringOption(opt =>
-      opt.setName('equipe_exterieur').setDescription("L'equipe qui se deplace.").setRequired(true))
-    .toJSON()
-];
+function buildPredictionMessage(homeTeam, awayTeam, p) {
+  let msg = `<b>Prediction : ${homeTeam} vs ${awayTeam}</b>\n\n`;
 
-// =====================
-// 12. MODE DEPLOY
-// =====================
-if (process.argv.includes('--deploy')) {
-  const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
-  try {
-    console.log(`Enregistrement de ${commandsData.length} commande(s)...`);
-    const data = await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commandsData }
-    );
-    console.log(`${data.length} commande(s) enregistree(s) avec succes.`);
-  } catch (error) {
-    console.error(error);
+  msg += `<b>Resultat 1X2</b>\n`;
+  msg += `${homeTeam}: <b>${p.homeWinProb}%</b>\n`;
+  msg += `Nul: <b>${p.drawProb}%</b>\n`;
+  msg += `${awayTeam}: <b>${p.awayWinProb}%</b>\n\n`;
+
+  if (p.homeForm && p.awayForm) {
+    msg += `<b>Forme recente</b>\n`;
+    msg += `${homeTeam}: <b>${p.homeForm.score}%</b> (${p.homeForm.wins}V ${p.homeForm.draws}N ${p.homeForm.losses}D)\n`;
+    msg += `${awayTeam}: <b>${p.awayForm.score}%</b> (${p.awayForm.wins}V ${p.awayForm.draws}N ${p.awayForm.losses}D)\n\n`;
   }
-  process.exit(0);
-}
-
-// =====================
-// 13. CONSTRUCTION DE L'EMBED
-// =====================
-function buildPredictionEmbed(homeTeam, awayTeam, p) {
-  const embed = new EmbedBuilder()
-    .setTitle(`🔮 Prediction complete : ${homeTeam} vs ${awayTeam}`)
-    .setColor(0x00ae86)
-    .setTimestamp();
-
-  embed.addFields({
-    name: '📊 Resultat du match (1X2)',
-    value: `🏠 ${homeTeam}: **${p.homeWinProb}%**\n🤝 Nul: **${p.drawProb}%**\n✈️ ${awayTeam}: **${p.awayWinProb}%**`,
-    inline: false
-  });
 
   if (p.totalGoals) {
-    embed.addFields({
-      name: '⚽ Total de buts',
-      value: `Ligne ${p.totalGoals.line}\nPlus: **${p.totalGoals.overProb}%** (cote ${p.totalGoals.over})\nMoins: **${p.totalGoals.underProb}%** (cote ${p.totalGoals.under})`,
-      inline: true
-    });
+    msg += `<b>Total de buts</b> (ligne ${p.totalGoals.line})\n`;
+    msg += `Plus: <b>${p.totalGoals.overProb}%</b> (cote ${p.totalGoals.over})\n`;
+    msg += `Moins: <b>${p.totalGoals.underProb}%</b> (cote ${p.totalGoals.under})\n\n`;
   }
 
   if (p.btts) {
-    embed.addFields({
-      name: '🎯 Les 2 equipes marquent',
-      value: `Oui: **${p.btts.yesProb}%** (cote ${p.btts.yes})\nNon: **${p.btts.noProb}%** (cote ${p.btts.no})`,
-      inline: true
-    });
+    msg += `<b>Les 2 equipes marquent</b>\n`;
+    msg += `Oui: <b>${p.btts.yesProb}%</b> (cote ${p.btts.yes})\n`;
+    msg += `Non: <b>${p.btts.noProb}%</b> (cote ${p.btts.no})\n\n`;
   }
 
   if (p.corners) {
-    embed.addFields({
-      name: '🚩 Total corners',
-      value: `Dom: ${p.corners.home} | Ext: ${p.corners.away}\nTotal: **${p.corners.total}**\n${p.corners.prediction}`,
-      inline: true
-    });
+    msg += `<b>Corners</b>\n`;
+    msg += `Dom: ${p.corners.home} | Ext: ${p.corners.away}\n`;
+    msg += `Total: <b>${p.corners.total}</b> - ${p.corners.prediction}\n\n`;
   }
 
   if (p.shots) {
-    embed.addFields({
-      name: '🎯 Tirs cadres',
-      value: `Dom: ${p.shots.home} | Ext: ${p.shots.away}\nTotal: **${p.shots.total}**\n${p.shots.prediction}`,
-      inline: true
-    });
+    msg += `<b>Tirs cadres</b>\n`;
+    msg += `Dom: ${p.shots.home} | Ext: ${p.shots.away}\n`;
+    msg += `Total: <b>${p.shots.total}</b> - ${p.shots.prediction}\n\n`;
   }
 
   if (p.exactScore && p.exactScore.length > 0) {
-    const scoresText = p.exactScore
-      .map(s => `**${s.score}** (${s.probability}%)`)
-      .join(' | ');
-    embed.addFields({
-      name: '🎲 Scores exacts probables',
-      value: scoresText,
-      inline: false
-    });
+    msg += `<b>Scores exacts probables</b>\n`;
+    msg += p.exactScore.map(s => `${s.score} (${s.probability}%)`).join(' | ') + '\n\n';
   }
 
   if (p.odds) {
-    embed.addFields({
-      name: '💰 Cotes 1X2',
-      value: `Dom: ${p.odds.home} | Nul: ${p.odds.draw} | Ext: ${p.odds.away}`,
-      inline: false
-    });
+    msg += `<b>Cotes 1X2</b>\n`;
+    msg += `Dom: ${p.odds.home} | Nul: ${p.odds.draw} | Ext: ${p.odds.away}\n`;
   }
 
-  embed.setFooter({ text: "Base sur l'analyse de donnees et modeles IA." });
-  return embed;
+  return msg;
+}
+
+function buildFormMessage(teamName, form) {
+  let color = form.score >= 70 ? 'Bonne forme' : (form.score <= 30 ? 'Mauvaise forme' : 'Forme moyenne');
+  let msg = `<b>Forme de ${teamName}</b>\n\n`;
+  msg += `Score: <b>${form.score}%</b> (${color})\n`;
+  msg += `Bilan: ${form.wins}V - ${form.draws}N - ${form.losses}D\n`;
+  msg += `Buts: ${form.goalsFor} marques / ${form.goalsAgainst} encaisses\n`;
+  msg += `Analyse sur ${form.matches} matchs recents.`;
+  return msg;
+}
+
+function buildH2HMessage(team1Name, team2Name, h2h) {
+  let msg = `<b>Confrontations : ${team1Name} vs ${team2Name}</b>\n\n`;
+  msg += `<b>Bilan</b>\n`;
+  msg += `${team1Name}: <b>${h2h.team1Wins}</b> victoires\n`;
+  msg += `Nuls: <b>${h2h.draws}</b>\n`;
+  msg += `${team2Name}: <b>${h2h.team2Wins}</b> victoires\n\n`;
+
+  msg += `<b>Buts</b>\n`;
+  msg += `${team1Name}: ${h2h.team1Goals} | ${team2Name}: ${h2h.team2Goals}\n\n`;
+
+  if (h2h.total > 0) {
+    const bttsPct = Math.round((h2h.bttsCount / h2h.total) * 100);
+    const over25Pct = Math.round((h2h.over25Count / h2h.total) * 100);
+    msg += `<b>Stats</b>\n`;
+    msg += `BTTS: <b>${bttsPct}%</b>\n`;
+    msg += `Plus de 2.5 buts: <b>${over25Pct}%</b>\n\n`;
+  }
+
+  msg += `Analyse sur ${h2h.total} confrontations.`;
+  return msg;
 }
 
 // =====================
-// 14. EXECUTION COMMANDE
+// 9. BOT TELEGRAM
 // =====================
-async function executePredire(interaction) {
-  const homeTeam = interaction.options.getString('equipe_domicile');
-  const awayTeam = interaction.options.getString('equipe_exterieur');
+const bot = new Telegraf(BOT_TOKEN);
 
-  await interaction.deferReply();
+// Commande /start
+bot.start((ctx) => {
+  ctx.reply(
+    `Bienvenue sur Empereur Predication !\n\n` +
+    `Commandes disponibles :\n` +
+    `/predire <equipe1> <equipe2> - Prediction complete\n` +
+    `/forme <equipe> - Forme recente\n` +
+    `/h2h <equipe1> <equipe2> - Confrontations\n\n` +
+    `Exemple : /predire PSG Marseille`
+  );
+});
+
+// Commande /help
+bot.help((ctx) => {
+  ctx.reply(
+    `Aide :\n\n` +
+    `/predire PSG Marseille - Analyse complete\n` +
+    `/forme PSG - Forme de PSG\n` +
+    `/h2h PSG Marseille - Historique des duels\n\n` +
+    `Le bot analyse les stats, la forme et les cotes pour vous.`
+  );
+});
+
+// Commande /predire
+bot.command('predire', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 2) {
+    return ctx.reply('Usage : /predire <equipe1> <equipe2>\nExemple : /predire PSG Marseille');
+  }
+
+  const homeTeam = args[0];
+  const awayTeam = args.slice(1).join(' ');
+
+  const loadingMsg = await ctx.reply(`Analyse de ${homeTeam} vs ${awayTeam} en cours...`);
 
   try {
     const prediction = await getFullPrediction(homeTeam, awayTeam);
-    const embed = buildPredictionEmbed(homeTeam, awayTeam, prediction);
-    await interaction.editReply({ embeds: [embed] });
+    const message = buildPredictionMessage(homeTeam, awayTeam, prediction);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      message,
+      { parse_mode: 'HTML' }
+    );
   } catch (error) {
     console.error(error);
-    await interaction.editReply(
-      `❌ Impossible de generer une prediction pour **${homeTeam} vs ${awayTeam}**.\n> ${error.message}`
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      `Erreur : ${error.message}`
     );
   }
-}
+});
 
-// =====================
-// 15. CLIENT DISCORD
-// =====================
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-client.commands = new Collection();
-client.commands.set('predire', { data: commandsData[0], execute: executePredire });
+// Commande /forme
+bot.command('forme', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 1) {
+    return ctx.reply('Usage : /forme <equipe>\nExemple : /forme PSG');
+  }
 
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const command = client.commands.get(interaction.commandName);
-  if (!command) return;
+  const teamName = args.join(' ');
+  const loadingMsg = await ctx.reply(`Analyse de ${teamName} en cours...`);
 
   try {
-    await command.execute(interaction);
+    const team = await searchTeam(teamName);
+    if (!team) throw new Error(`Equipe introuvable : ${teamName}`);
+
+    const recentMatches = await getTeamRecentMatches(team.id);
+    if (recentMatches.length === 0) throw new Error('Aucun match recent trouve.');
+
+    const form = calculateForm(recentMatches, team.id);
+    const message = buildFormMessage(teamName, form);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      message,
+      { parse_mode: 'HTML' }
+    );
   } catch (error) {
     console.error(error);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: '❌ Une erreur est survenue.', ephemeral: true });
-    } else {
-      await interaction.reply({ content: '❌ Une erreur est survenue.', ephemeral: true });
-    }
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      `Erreur : ${error.message}`
+    );
   }
 });
 
-client.once(Events.ClientReady, c => {
-  console.log(`Pret ! Connecte en tant que ${c.user.tag}`);
+// Commande /h2h
+bot.command('h2h', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 2) {
+    return ctx.reply('Usage : /h2h <equipe1> <equipe2>\nExemple : /h2h PSG Marseille');
+  }
+
+  const team1Name = args[0];
+  const team2Name = args.slice(1).join(' ');
+  const loadingMsg = await ctx.reply(`Analyse des confrontations en cours...`);
+
+  try {
+    const [team1, team2] = await Promise.all([
+      searchTeam(team1Name),
+      searchTeam(team2Name)
+    ]);
+    if (!team1) throw new Error(`Equipe introuvable : ${team1Name}`);
+    if (!team2) throw new Error(`Equipe introuvable : ${team2Name}`);
+
+    const matches = await getHeadToHead(team1.id, team2.id);
+    if (matches.length === 0) throw new Error('Aucune confrontation trouvee.');
+
+    const h2h = analyzeH2H(matches, team1.id);
+    const message = buildH2HMessage(team1Name, team2Name, h2h);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      message,
+      { parse_mode: 'HTML' }
+    );
+  } catch (error) {
+    console.error(error);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      `Erreur : ${error.message}`
+    );
+  }
 });
 
-client.login(BOT_TOKEN);
+// Gestion des erreurs globales
+bot.catch((err, ctx) => {
+  console.error(`Erreur pour ${ctx.updateType}:`, err);
+});
+
+// Lancement du bot
+bot.launch().then(() => {
+  console.log('Bot Telegram lance !');
+});
+
+// Arret propre
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
