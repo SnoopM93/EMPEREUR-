@@ -8,8 +8,8 @@ datasource db {
 }
 
 model League {
-  id         String  @id @default(cuid())
-  externalId String? @unique
+  id         String   @id @default(cuid())
+  externalId String?  @unique
   name       String
   country    String
   logoUrl    String?
@@ -18,37 +18,36 @@ model League {
 }
 
 model Team {
-  id          String  @id @default(cuid())
-  externalId  String  @unique
+  id          String   @id @default(cuid())
+  externalId  String   @unique
   name        String
   logoUrl     String?
   leagueId    String
-  league      League  @relation(fields: [leagueId], references: [id])
-  homeMatches Match[] @relation("HomeTeam")
-  awayMatches Match[] @relation("AwayTeam")
+  league      League   @relation(fields: [leagueId], references: [id])
+  homeMatches Match[]  @relation("HomeTeamMatches")
+  awayMatches Match[]  @relation("AwayTeamMatches")
 }
 
 model Match {
-  id         String      @id @default(cuid())
-  externalId String      @unique
-  date       DateTime
-  status     MatchStatus @default(SCHEDULED)
-  leagueId   String
-  league     League      @relation(fields: [leagueId```
-
-], references: [id])
-  homeTeamId String
-  homeTeam   Team        @relation("HomeTeam", fields: [homeTeamId], references: [id])
-  awayTeamId String
-  awayTeam   Team        @relation("AwayTeam", fields: [---
-
-awayTeamId], references: [id])
-  homeScore  Int?
-  awayScore  Int?
-  prediction Prediction?
+  id          String      @id @default(cuid())
+  externalId  String      @unique
+  date        DateTime
+  status      MatchStatus @default(SCHEDULED)
+  leagueId    String
+  league      League      @relation(fields: [leagueId], references: [id])
+  
+  homeTeamId  String
+  homeTeam    Team        @relation("HomeTeamMatches", fields: [homeTeamId], references: [id])
+  
+  awayTeamId  String
+  awayTeam    Team        @relation("AwayTeamMatches", fields: [awayTeamId], references: [id])
+  
+  homeScore   Int?
+  awayScore   Int?
+  prediction  Prediction?
 }
 
-enum Match###Status {
+enum MatchStatus {
   SCHEDULED
   LIVE
   FINISHED
@@ -56,9 +55,9 @@ enum Match###Status {
 }
 
 model Prediction {
-  📄 id          String     @id @default(cuid())
+  id          String     @id @default(cuid())
   matchId     String     @unique
-  match       Match      @relation F(fields: [matchId], references: [id])
+  match       Match      @relation(fields: [matchId], references: [id])
   probHomeWin Float
   probDraw    Float
   probAwayWin Float
@@ -80,11 +79,3 @@ enum Signal {
   SIGNAL_FORT
   TOP_PICK
 }
-ichier 4 : `.gitignore`
-*À créer à la racine. Cela empêchera GitHub de pousser vos secrets.*
-
-```text
-node_modules/
-.env
-cache.json
-.DS_Store
