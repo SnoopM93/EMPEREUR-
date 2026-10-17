@@ -14,7 +14,7 @@ model League {
   country    String
   logoUrl    String?
   matches    Match[]
-  teams      Team[]   // <-- Ligne ajoutée pour corriger l'erreur P1012
+  teams      Team[]
 }
 
 model Team {
@@ -34,17 +34,21 @@ model Match {
   date       DateTime
   status     MatchStatus @default(SCHEDULED)
   leagueId   String
-  league     League      @relation(fields: [leagueId], references: [id])
+  league     League      @relation(fields: [leagueId```
+
+], references: [id])
   homeTeamId String
   homeTeam   Team        @relation("HomeTeam", fields: [homeTeamId], references: [id])
   awayTeamId String
-  awayTeam   Team        @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  awayTeam   Team        @relation("AwayTeam", fields: [---
+
+awayTeamId], references: [id])
   homeScore  Int?
   awayScore  Int?
   prediction Prediction?
 }
 
-enum MatchStatus {
+enum Match###Status {
   SCHEDULED
   LIVE
   FINISHED
@@ -52,9 +56,9 @@ enum MatchStatus {
 }
 
 model Prediction {
-  id          String     @id @default(cuid())
+  📄 id          String     @id @default(cuid())
   matchId     String     @unique
-  match       Match      @relation(fields: [matchId], references: [id])
+  match       Match      @relation F(fields: [matchId], references: [id])
   probHomeWin Float
   probDraw    Float
   probAwayWin Float
@@ -76,3 +80,11 @@ enum Signal {
   SIGNAL_FORT
   TOP_PICK
 }
+ichier 4 : `.gitignore`
+*À créer à la racine. Cela empêchera GitHub de pousser vos secrets.*
+
+```text
+node_modules/
+.env
+cache.json
+.DS_Store
